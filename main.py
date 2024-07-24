@@ -1,29 +1,35 @@
-import cv2
+import matplotlib.pyplot as plt
 import numpy as np
-from tkinter import Tk, Button, Scale, HORIZONTAL, filedialog, Label, messagebox
+import cv2
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+from tkinter import Tk, Button, filedialog, Label, Toplevel
 from PIL import Image, ImageTk
-import svgwrite
+import random
+import threading
+import time
 
-class ImageSegmentationApp:
+sam_checkpoint = "sam_vit_h_4b8939.pth"
+model_type = "vit_h"
+device = "cpu"
+
+# Load the SAM model
+sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+sam.to(device=device)
+mask_generator = SamAutomaticMaskGenerator(sam)
+
+class MaskSelectionApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image Segmentation Tool")
+        self.root.title("Mask Selection Tool")
 
         self.image = None
-        self.segmented_image = None
-        self.color_image = None
-        self.selected_segments = []
+        self.masks = None
+        self.selected_masks = []
 
         self.load_button = Button(root, text="Load Image", command=self.load_image)
         self.load_button.pack()
 
-        self.threshold_label = Label(root, text="Threshold:")
-        self.threshold_label.pack()
-
-        self.threshold_scale = Scale(root, from_=0, to_=255, orient=HORIZONTAL, command=self.segment_image)
-        self.threshold_scale.pack()
-
-        self.save_button = Button(root, text="Save Segmented Image", command=self.save_image)
+        self.save_button = Button(root, text="Save Selected Masks", command=self.save_selected_masks)
         self.save_button.pack()
 
         self.image_label = Label(root)
@@ -34,73 +40,97 @@ class ImageSegmentationApp:
     def load_image(self):
         file_path = filedialog.askopenfilename()
         if file_path:
-            self.image = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-            self.color_image = cv2.imread(file_path)
-            if self.image is None or self.color_image is None:
-                messagebox.showerror("Error", "Failed to load image!")
+            self.image = cv2.imread(file_path)
+            if self.image is None:
                 return
-            self.display_image(self.image)
-            self.segment_image()
 
-    def segment_image(self, val=0):
-        if self.image is None:
-            return
-        threshold_value = self.threshold_scale.get()
-        _, self.segmented_image = cv2.threshold(self.image, threshold_value, 255, cv2.THRESH_BINARY)
-        self.selected_segments = []
-        self.display_image(self.segmented_image)
+            # Show loading message
+            loading_window = Toplevel(self.root)
+            loading_window.title("Loading")
+            loading_label = Label(loading_window, text="Masking in progress...")
+            loading_label.pack()
 
-    def display_image(self, img):
-        if img is None:
-            return
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if len(img.shape) == 3 else img
+            def generate_masks():
+                self.masks = mask_generator.generate(self.image)
+                self.display_image_with_masks()
+                loading_window.destroy()
+
+            threading.Thread(target=generate_masks).start()
+
+    def display_image_with_masks(self):
+        img = self.image.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        overlay = img.copy()
+        for mask in self.masks:
+            color = [random.randint(0, 255) for _ in range(3)]
+            overlay[mask['segmentation']] = color
+
+        alpha = 0.5  # Transparency factor.
+        img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
+
         img = Image.fromarray(img)
         img_tk = ImageTk.PhotoImage(image=img)
         self.image_label.configure(image=img_tk)
         self.image_label.image = img_tk
 
     def on_click(self, event):
-        if self.segmented_image is None:
+        if self.image is None or self.masks is None:
             return
-        x = event.x
-        y = event.y
-        if x < self.segmented_image.shape[1] and y < self.segmented_image.shape[0]:
-            mask = np.zeros_like(self.segmented_image)
-            mask[self.segmented_image == self.segmented_image[y, x]] = 255
-            self.selected_segments.append((mask, self.color_image[y, x]))
-            self.highlight_segment(mask)
 
-    def highlight_segment(self, mask):
-        highlighted_image = self.segmented_image.copy()
-        highlighted_image[mask == 255] = 128
-        self.display_image(highlighted_image)
+        x, y = event.x, event.y
+        selected_mask = None
+        for mask in self.masks:
+            if mask['segmentation'][y, x]:
+                selected_mask = mask
+                break
 
-    def save_image(self):
-        if not self.selected_segments:
-            messagebox.showwarning("Warning", "No segmented part selected!")
+        if selected_mask:
+            self.selected_masks.append(selected_mask)
+            self.highlight_selected_masks()
+
+    def highlight_selected_masks(self):
+        img = self.image.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        overlay = img.copy()
+        for mask in self.masks:
+            color = [random.randint(0, 255) for _ in range(3)]
+            overlay[mask['segmentation']] = color
+
+        alpha = 0.5  # Transparency factor.
+        img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
+
+        # Highlight selected masks in white, transparent overlay
+        for mask in self.selected_masks:
+            overlay[mask['segmentation']] = [255, 255, 255]
+        img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
+
+        img = Image.fromarray(img)
+        img_tk = ImageTk.PhotoImage(image=img)
+        self.image_label.configure(image=img_tk)
+        self.image_label.image = img_tk
+
+    def save_selected_masks(self):
+        if not self.selected_masks:
             return
-        file_path = filedialog.asksaveasfilename(defaultextension=".svg",
-                                                 filetypes=[("SVG files", "*.svg"), ("All files", "*.*")])
+
+        file_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                                 filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
         if file_path:
-            self.save_svg(file_path)
-            messagebox.showinfo("Info", "SVG file saved successfully!")
+            combined_mask = np.zeros_like(self.image[:, :, 0])
+            for mask in self.selected_masks:
+                combined_mask = np.bitwise_or(combined_mask, mask['segmentation'].astype(np.uint8))
 
-    def save_svg(self, file_path):
-        dwg = svgwrite.Drawing(file_path)
-        height, width = self.segmented_image.shape
-
-        for mask, color in self.selected_segments:
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for contour in contours:
-                points = [(point[0][0], point[0][1]) for point in contour]
-                color_hex = '#%02x%02x%02x' % (color[2], color[1], color[0])
-                dwg.add(dwg.polygon(points, fill=color_hex))
-
-        dwg.save()
+            cv2.imwrite(file_path, combined_mask * 255)
+            print(f"Selected masks saved to {file_path}")
 
 if __name__ == "__main__":
     root = Tk()
-    app = ImageSegmentationApp(root)
+    app = MaskSelectionApp(root)
     root.mainloop()
+
+
+
 
 
